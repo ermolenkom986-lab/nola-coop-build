@@ -61,7 +61,8 @@ struct FileLock
     explicit FileLock(const fs::path& path)
     {
         SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-        file.h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+        // MSVC fopen_s denies other writers; a read handle can still lock the range.
+        file.h = CreateFileW(path.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, nullptr);
         ready.h = CreateEventW(&security, TRUE, FALSE, nullptr);
         release.h = CreateEventW(&security, TRUE, FALSE, nullptr);
@@ -318,14 +319,15 @@ static void write_failure()
     f.start();
     FileLock lock(f.dir / "sx_in.part");
     Handle probe;
-    probe.h = CreateFileW((f.dir / "sx_in.part").c_str(), GENERIC_WRITE,
+    probe.h = CreateFileW((f.dir / "sx_in.part").c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     require(probe.h != INVALID_HANDLE_VALUE, "could not open lock probe");
-    DWORD written = 0;
-    if (WriteFile(probe.h, "\0", 1, &written, nullptr))
+    char byte = 0;
+    DWORD read = 0;
+    if (ReadFile(probe.h, &byte, 1, &read, nullptr))
     {
         require(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr,
-            "lock helper did not prevent writes on Windows");
+            "lock helper did not exclude another handle on Windows");
         throw Unavailable("this Wine runtime does not enforce byte-range locks; run on Windows");
     }
     require(GetLastError() == ERROR_LOCK_VIOLATION, "lock probe failed for an unrelated reason");
@@ -355,16 +357,24 @@ static void crc_retry()
 static void crc_length_retry()
 {
     Fixture f;
+    Handle destination;
     f.start();
-    f.feed(f.chunk(0));
+    put(f.dir / "sx_in.pkg", "previous package");
+    destination.h = CreateFileW((f.dir / "sx_in.pkg").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    require(destination.h != INVALID_HANDLE_VALUE, "could not block publication for corruption fixture");
+    bool threw = false;
+    try { f.all(); } catch (const std::exception&) { threw = true; }
+    require(threw && f.sx->stats.done == 0, "publication was not blocked");
+    // Publication failure closes the CRT stream. Modify only this closed file;
+    // MSVC fopen_s intentionally denies other writers during active reception.
     {
         std::ofstream append(f.dir / "sx_in.part", std::ios::binary | std::ios::app);
         append << "extra bytes";
         append.close();
         require(!append.fail(), "could not extend fixture part file");
     }
-    f.feed(f.chunk(1));
-    f.feed(f.chunk(2));
+    destination.close();
+    f.sx->tick(102, f.send);
     require(f.sx->stats.crcbad == 1 && f.sx->stats.done == 0, "wrong file length was published");
     f.all();
     f.complete();
