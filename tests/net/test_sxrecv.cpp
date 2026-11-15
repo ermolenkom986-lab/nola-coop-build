@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <io.h>
 #include "s2r_net.h"
 
 #include <cstdio>
@@ -27,7 +28,6 @@ static void require(bool ok, const char* what)
 {
     if (!ok) throw std::runtime_error(what);
 }
-struct Unavailable : std::runtime_error { using std::runtime_error::runtime_error; };
 static void put(const fs::path& p, const std::string& data)
 {
     std::ofstream f(p, std::ios::binary);
@@ -53,53 +53,29 @@ struct Handle
         h = INVALID_HANDLE_VALUE;
     }
 };
-// Wine implements byte-range exclusion between processes, but allows another
-// handle in the same process to write. Use a real peer process on both platforms.
-struct FileLock
+// Locate only this fixture's CRT handle, without accessing SaveXfer internals.
+// Invalidating it produces a real I/O failure even though MSVC fopen_s denies
+// external file opens (and Wine does not enforce all byte-range locks).
+static HANDLE part_handle(const fs::path& path)
 {
-    Handle file, ready, release, process;
-    explicit FileLock(const fs::path& path)
+    struct InvalidParameterGuard
     {
-        SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-        // MSVC fopen_s denies other writers; a read handle can still lock the range.
-        file.h = CreateFileW(path.c_str(), GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, nullptr);
-        ready.h = CreateEventW(&security, TRUE, FALSE, nullptr);
-        release.h = CreateEventW(&security, TRUE, FALSE, nullptr);
-        require(file.h != INVALID_HANDLE_VALUE && ready.h && release.h, "could not create lock fixture");
-        wchar_t exe[32768];
-        require(GetModuleFileNameW(nullptr, exe, 32768) != 0, "test executable path unavailable");
-        std::wstring command = L"\"" + std::wstring(exe) + L"\" --lock " +
-            std::to_wstring((uintptr_t)file.h) + L" " + std::to_wstring((uintptr_t)ready.h) + L" " + std::to_wstring((uintptr_t)release.h);
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        PROCESS_INFORMATION child{};
-        require(CreateProcessW(exe, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-            nullptr, nullptr, &startup, &child) != 0, "lock helper could not start");
-        process.h = child.hProcess;
-        CloseHandle(child.hThread);
-        HANDLE wait[] = {ready.h, process.h};
-        DWORD result = WaitForMultipleObjects(2, wait, FALSE, 10000);
-        if (result != WAIT_OBJECT_0)
-        {
-            unlock();
-            throw std::runtime_error("lock helper did not acquire file lock");
-        }
-    }
-    void unlock()
+        _invalid_parameter_handler old = _set_invalid_parameter_handler(
+            [](const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {});
+        ~InvalidParameterGuard() { _set_invalid_parameter_handler(old); }
+    } guard;
+    std::wstring suffix = L"\\" + path.parent_path().filename().wstring() + L"\\" + path.filename().wstring();
+    for (int fd = 0; fd < _getmaxstdio(); ++fd)
     {
-        if (process.h == INVALID_HANDLE_VALUE) return;
-        SetEvent(release.h);
-        if (WaitForSingleObject(process.h, 10000) != WAIT_OBJECT_0)
-        {
-            TerminateProcess(process.h, 1);
-            WaitForSingleObject(process.h, 10000);
-        }
-        process.close();
-        file.close();
+        intptr_t raw = _get_osfhandle(fd);
+        if (raw == -1 || raw == -2) continue;
+        wchar_t name[32768];
+        DWORD n = GetFinalPathNameByHandleW((HANDLE)raw, name, 32768, FILE_NAME_NORMALIZED);
+        if (n >= suffix.size() && n < 32768 && _wcsicmp(name + n - suffix.size(), suffix.c_str()) == 0)
+            return (HANDLE)raw;
     }
-    ~FileLock() { unlock(); }
-};
+    throw std::runtime_error("fixture part file handle was not found");
+}
 struct Fixture
 {
     fs::path dir;
@@ -311,31 +287,16 @@ static void crc_reopen_failure()
     f.all();
     f.complete();
 }
-static void write_failure()
+static void io_failure_recovery()
 {
     Fixture f;
     f.ch = 8192;
     f.payload = std::string(16384, 'a');
     f.start();
-    FileLock lock(f.dir / "sx_in.part");
-    Handle probe;
-    probe.h = CreateFileW((f.dir / "sx_in.part").c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-    require(probe.h != INVALID_HANDLE_VALUE, "could not open lock probe");
-    char byte = 0;
-    DWORD read = 0;
-    if (ReadFile(probe.h, &byte, 1, &read, nullptr))
-    {
-        require(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr,
-            "lock helper did not exclude another handle on Windows");
-        throw Unavailable("this Wine runtime does not enforce byte-range locks; run on Windows");
-    }
-    require(GetLastError() == ERROR_LOCK_VIOLATION, "lock probe failed for an unrelated reason");
-    probe.close();
+    require(CloseHandle(part_handle(f.dir / "sx_in.part")) != 0, "could not invalidate fixture handle");
     bool threw = false;
     try { f.feed(f.chunk(0)); } catch (const std::exception&) { threw = true; }
-    require(threw && f.sx->stats.recv == 0, "failed write counted as received");
-    lock.unlock();
+    require(threw && f.sx->stats.recv == 0, "failed I/O counted as received");
     f.sx->tick(102, f.send);
     f.info();
     f.all();
@@ -438,37 +399,24 @@ static void independent_receivers()
     b.complete();
 }
 
-int main(int argc, char** argv)
+int main()
 {
-    if (argc == 5 && std::string(argv[1]) == "--lock")
-    {
-        HANDLE file = (HANDLE)(uintptr_t)std::strtoull(argv[2], nullptr, 10);
-        HANDLE ready = (HANDLE)(uintptr_t)std::strtoull(argv[3], nullptr, 10);
-        HANDLE release = (HANDLE)(uintptr_t)std::strtoull(argv[4], nullptr, 10);
-        OVERLAPPED overlap{};
-        if (!LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &overlap)) return 2;
-        SetEvent(ready);
-        DWORD result = WaitForSingleObject(release, 30000);
-        UnlockFileEx(file, 0, MAXDWORD, MAXDWORD, &overlap);
-        return result == WAIT_OBJECT_0 ? 0 : 3;
-    }
     struct Case { const char* name; void (*run)(); };
     const Case cases[] = {
         {"reorder_duplicate", reorder_duplicate}, {"lengths", lengths}, {"headers", headers},
         {"rename_retry", rename_retry}, {"resume_complete", resume_complete}, {"resume_partial", resume_partial},
         {"bad_bitmap", bad_bitmap}, {"empty_package", empty_package}, {"crc_reopen_failure", crc_reopen_failure},
-        {"write_failure", write_failure}, {"crc_retry", crc_retry}, {"crc_length_retry", crc_length_retry}, {"range_overflow", range_overflow},
+        {"io_failure_recovery", io_failure_recovery}, {"crc_retry", crc_retry}, {"crc_length_retry", crc_length_retry}, {"range_overflow", range_overflow},
         {"cancel_and_new_request", cancel_and_new_request}, {"peer_absent", peer_absent},
         {"independent_receivers", independent_receivers},
     };
-    int failures = 0, skipped = 0;
+    int failures = 0;
     for (const auto& test : cases)
     {
         try { test.run(); std::printf("ok   %s\n", test.name); }
-        catch (const Unavailable& e) { ++skipped; std::printf("SKIP %s: %s\n", test.name, e.what()); }
         catch (const std::exception& e) { ++failures; std::printf("FAIL %s: %s\n", test.name, e.what()); }
         std::fflush(stdout);
     }
-    std::printf("%s (%d failed, %d skipped, %zu cases)\n", failures ? "FAIL" : skipped ? "PASS WITH SKIP" : "ALL PASS", failures, skipped, sizeof(cases) / sizeof(cases[0]));
+    std::printf("%s (%d failed, %zu cases)\n", failures ? "FAIL" : "ALL PASS", failures, sizeof(cases) / sizeof(cases[0]));
     return failures ? 1 : 0;
 }

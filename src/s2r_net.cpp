@@ -2437,8 +2437,9 @@ namespace s2r
             if (_fseeki64(f, (int64_t)off, SEEK_SET) != 0 ||
                 std::fwrite(data.data() + 16, 1, len, f) != len || std::fflush(f) != 0)
             {
-                std::clearerr(f);
-                asked_.erase(i);
+                // A failed stream may no longer be usable. Reopen through the info
+                // exchange; a checkpoint only contains successfully flushed chunks.
+                reset();
                 throw SxError("OSError('sx_in.part write')");
             }
             got_[i] = 1;

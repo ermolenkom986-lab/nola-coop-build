@@ -43,9 +43,9 @@ The cases cover malformed chunks and headers, duplicate/reordered delivery, resu
 checkpoints, CRC recovery, Windows file locks, publication retry, cancellation,
 independent receivers and request range overflow. File locks exercise real I/O
 failures, including failure to reopen a part file after a CRC mismatch.
-The write-failure case first checks that the OS enforces its byte-range lock. It
-reports `SKIP` on Wine runtimes that permit writes through that lock; Windows must
-enforce it, so inability to establish the fixture is a failure there.
+The I/O-failure case invalidates only the temporary part file's OS handle to
+exercise a real seek/write error and subsequent reopening. It does not depend on
+external byte-range locks, which differ between MSVC and Wine.
 
 ## Native layer suite
 
