@@ -19,7 +19,8 @@ jobs:
           persist-credentials: false
 
       - name: Use HTTPS for public dependency submodules
-        run: git config --global url.https://github.com/.insteadOf git@github.com:
+        run: |
+          git config --global url.https://github.com/.insteadOf git@github.com:
 
       - name: Checkout matching UE4SS SDK
         uses: actions/checkout@v4
