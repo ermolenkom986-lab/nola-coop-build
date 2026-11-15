@@ -1,0 +1,118 @@
+name: Build patched NOLA for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 75
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Checkout patched mod
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Use HTTPS for public dependency submodules
+        run: git config --global url.https://github.com/.insteadOf git@github.com:
+
+      - name: Checkout matching UE4SS SDK
+        uses: actions/checkout@v4
+        with:
+          repository: UE4SS-RE/RE-UE4SS
+          ref: 5e627997bf265ae6fc89d23357543d8c8ac05a6f
+          path: dependencies/RE-UE4SS
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Locate MSVC and configure existing test scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'MSVC build tools are unavailable' }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          "NOLA_VCVARS64=$vcvars" >> $env:GITHUB_ENV
+          $dir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
+          if (-not (Test-Path "$dir\vcvars64.bat")) {
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            Set-Content "$dir\vcvars64.bat" "@call `"$vcvars`" %*" -Encoding ascii
+          }
+          cmake --version
+          rustc --version
+          git -C dependencies/RE-UE4SS submodule status --recursive | Tee-Object -FilePath dependency-versions.txt
+
+      - name: Run save-transfer regression tests on Windows
+        shell: pwsh
+        run: |
+          & cmd.exe /c tests\net\build_sxrecv.bat 2>&1 | Tee-Object -FilePath sxrecv.log
+          if ($LASTEXITCODE -ne 0) { throw 'Save receiver tests failed' }
+          if (Select-String -Path sxrecv.log -Pattern '^SKIP\b') { throw 'A native Windows test was skipped' }
+          & cmd.exe /c tests\net\build_sxreq.bat 2>&1 | Tee-Object -FilePath sxreq.log
+          if ($LASTEXITCODE -ne 0) { throw 'Save request tests failed' }
+
+      - name: Configure release DLL
+        shell: pwsh
+        run: |
+          $ue4ss = (Resolve-Path dependencies/RE-UE4SS).Path.Replace('\', '/')
+          $rustc = (Get-Command rustc.exe).Source.Replace('\', '/')
+          cmake -S cppbuild -B cppbuild/Output -G 'Visual Studio 17 2022' -A x64 "-DNOLA_UE4SS_DIR=$ue4ss" "-DRust_COMPILER=$rustc" -DS2X_RELEASE=ON
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed' }
+
+      - name: Compile NolaNative and SDK libraries
+        shell: pwsh
+        run: |
+          cmake --build cppbuild/Output --config Game__Shipping__Win64 --target NolaNative -- /m:2 /verbosity:minimal 2>&1 | Tee-Object -FilePath build-release.log
+          if ($LASTEXITCODE -ne 0) { throw 'Release compilation failed' }
+
+      - name: Check embedded release data and stage DLL
+        shell: pwsh
+        run: |
+          $dll = 'cppbuild/Output/NolaNative/Game__Shipping__Win64/NolaNative.dll'
+          if (-not (Test-Path $dll)) { throw "DLL missing: $dll" }
+          python modwork/s2coop/tools/check_release_tables.py --dll $dll --repo . 2>&1 | Tee-Object -FilePath release-tables.log
+          if ($LASTEXITCODE -ne 0) { throw 'Embedded release data check failed' }
+          New-Item -ItemType Directory -Force build-artifact | Out-Null
+          Copy-Item $dll build-artifact/main.dll
+          Copy-Item LICENSE build-artifact/LICENSE
+          Copy-Item sxrecv.log,sxreq.log,release-tables.log,dependency-versions.txt build-artifact/
+          $hash = (Get-FileHash build-artifact/main.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          $info = @{
+            source_commit = $env:GITHUB_SHA
+            source_repository = $env:GITHUB_REPOSITORY
+            upstream_tag = 'v1.4.2'
+            upstream_commit = 'be9cc362e00753e1676205a47a6af50f6f057fda'
+            ue4ss_commit = '5e627997bf265ae6fc89d23357543d8c8ac05a6f'
+            configuration = 'Game__Shipping__Win64;S2X_RELEASE=ON'
+            dll_sha256 = $hash
+            run_url = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            tested_in_game = $false
+          }
+          $info | ConvertTo-Json | Set-Content build-artifact/build-info.json -Encoding utf8
+          "$hash  main.dll" | Set-Content build-artifact/SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload compiled DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOLA-v1.4.2-save-transfer-dll
+          path: build-artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            *.log
+            dependency-versions.txt
+            cppbuild/Output/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 14
