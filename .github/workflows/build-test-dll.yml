@@ -2,12 +2,56 @@ name: Build patched NOLA for Windows
 
 on:
   workflow_dispatch:
+    inputs:
+      build_dll:
+        description: Build the full DLL (requires access to the UEPseudo dependency)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 jobs:
+  tests:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Locate MSVC for native regression tests
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'MSVC build tools are unavailable' }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $dir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
+          if (-not (Test-Path "$dir\vcvars64.bat")) {
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            Set-Content "$dir\vcvars64.bat" "@call `"$vcvars`" %*" -Encoding ascii
+          }
+      - name: Run save-transfer regression tests on Windows
+        shell: pwsh
+        run: |
+          & cmd.exe /c tests\net\build_sxrecv.bat 2>&1 | Tee-Object -FilePath sxrecv.log
+          if ($LASTEXITCODE -ne 0) { throw 'Save receiver tests failed' }
+          if (Select-String -Path sxrecv.log -Pattern '^SKIP\b') { throw 'A native Windows test was skipped' }
+          & cmd.exe /c tests\net\build_sxreq.bat 2>&1 | Tee-Object -FilePath sxreq.log
+          if ($LASTEXITCODE -ne 0) { throw 'Save request tests failed' }
+      - name: Upload native test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-test-logs
+          path: |
+            sxrecv.log
+            sxreq.log
+          retention-days: 14
+
   build:
+    needs: tests
+    if: inputs.build_dll
     runs-on: windows-2022
     timeout-minutes: 75
     env:
@@ -30,6 +74,7 @@ jobs:
           path: dependencies/RE-UE4SS
           submodules: recursive
           persist-credentials: false
+          token: ${{ secrets.UE4SS_READ_TOKEN || github.token }}
 
       - name: Locate MSVC and configure existing test scripts
         shell: pwsh
@@ -49,14 +94,10 @@ jobs:
           rustc --version
           git -C dependencies/RE-UE4SS submodule status --recursive | Tee-Object -FilePath dependency-versions.txt
 
-      - name: Run save-transfer regression tests on Windows
-        shell: pwsh
-        run: |
-          & cmd.exe /c tests\net\build_sxrecv.bat 2>&1 | Tee-Object -FilePath sxrecv.log
-          if ($LASTEXITCODE -ne 0) { throw 'Save receiver tests failed' }
-          if (Select-String -Path sxrecv.log -Pattern '^SKIP\b') { throw 'A native Windows test was skipped' }
-          & cmd.exe /c tests\net\build_sxreq.bat 2>&1 | Tee-Object -FilePath sxreq.log
-          if ($LASTEXITCODE -ne 0) { throw 'Save request tests failed' }
+      - name: Download native test logs
+        uses: actions/download-artifact@v4
+        with:
+          name: native-test-logs
 
       - name: Configure release DLL
         shell: pwsh
