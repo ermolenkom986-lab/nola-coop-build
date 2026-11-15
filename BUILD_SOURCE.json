@@ -2,5 +2,5 @@
   "upstream_repository": "https://github.com/Joaovitor404silva/NOLA-Stalker2-Coop",
   "upstream_tag": "v1.4.2",
   "upstream_commit": "be9cc362e00753e1676205a47a6af50f6f057fda",
-  "purpose": "Private build workspace for the save-transfer recovery patch. Original CI replaced with an explicit Windows build workflow."
+  "purpose": "Windows build workspace for the save-transfer recovery patch. Original CI replaced with an explicit Windows build workflow."
 }
