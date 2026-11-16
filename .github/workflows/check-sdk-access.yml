@@ -1,0 +1,20 @@
+name: Check UE4SS SDK access
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the required private dependency revision
+        env:
+          UE4SS_READ_TOKEN: ${{ secrets.UE4SS_READ_TOKEN }}
+        run: python3 tools/check_sdk_access.py
