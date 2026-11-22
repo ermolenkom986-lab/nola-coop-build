@@ -1,0 +1,83 @@
+name: Package tested NOLA for installation
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful Build patched NOLA for Windows run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the selected build run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          run = os.environ['BUILD_RUN_ID']
+          if not run.isascii() or not run.isdecimal():
+              raise SystemExit('Expected a numeric build run ID')
+          repo = os.environ['GITHUB_REPOSITORY']
+          info = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/actions/runs/{run}']))
+          if info['conclusion'] != 'success' or info['path'] != '.github/workflows/build-test-dll.yml':
+              raise SystemExit('Choose a successful full build from this repository')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('EXPECTED_BUILD_COMMIT=' + info['head_sha'] + '\n')
+          PY
+
+      - name: Download compiled mod and validation logs
+        uses: actions/download-artifact@v4
+        with:
+          name: NOLA-v1.4.2-save-transfer-dll
+          path: compiled-mod
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Check artifact provenance
+        env:
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          info = json.loads(Path('compiled-mod/build-info.json').read_text(encoding='utf-8-sig'))
+          repo = os.environ['GITHUB_REPOSITORY']
+          expected_url = f"https://github.com/{repo}/actions/runs/{os.environ['BUILD_RUN_ID']}"
+          if (info['source_commit'] != os.environ['EXPECTED_BUILD_COMMIT']
+                  or info['source_repository'] != repo or info['run_url'] != expected_url):
+              raise SystemExit('The build manifest does not match the selected workflow run')
+          PY
+
+      - name: Download the official base package
+        run: |
+          curl --fail --location --retry 3 --output NOLA-Auto.zip https://github.com/Joaovitor404silva/NOLA-Stalker2-Coop/releases/download/v1.4.2/NOLA-Auto.zip
+
+      - name: Validate binaries and create the installation package
+        run: |
+          python3 -m pip install --disable-pip-version-check pefile==2024.8.26
+          python3 tools/package_sxfix.py --artifact-dir compiled-mod --base-zip NOLA-Auto.zip --repo . --output dist/NOLA-1.4.2-SXFIX-Preview.zip
+          cd dist
+          sha256sum NOLA-1.4.2-SXFIX-Preview.zip > NOLA-1.4.2-SXFIX-Preview.zip.sha256
+
+      - name: Upload the ready installation package
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOLA-1.4.2-SXFIX-ready
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
