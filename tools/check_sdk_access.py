@@ -42,6 +42,9 @@ def main():
             print("SDK_CLASSIC_REPO_SCOPE=not_reported")
         engine_status, _, _ = fetch("repos/EpicGames/UnrealEngine")
         print("SDK_UNREAL_ENGINE_HTTP=" + str(engine_status))
+        if engine_status != 200:
+            mirror_status, _, _ = fetch("repos/EpicGames-Mirror-A/UnrealEngine")
+            print("SDK_UNREAL_ENGINE_MIRROR_HTTP=" + str(mirror_status))
         repo_status, _, repo_headers = fetch("repos/Re-UE4SS/UEPseudo")
         print("SDK_UEPSEUDO_REPOSITORY_HTTP=" + str(repo_status))
         if "required" in repo_headers.get("X-GitHub-SSO", ""):
