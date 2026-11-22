@@ -62,6 +62,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify access to the pinned SDK dependency
+        env:
+          UE4SS_READ_TOKEN: ${{ secrets.UE4SS_READ_TOKEN }}
+        run: python tools/check_sdk_access.py
+
       - name: Use HTTPS for public dependency submodules
         run: |
           git config --global url.https://github.com/.insteadOf git@github.com:
