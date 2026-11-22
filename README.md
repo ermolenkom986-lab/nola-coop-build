@@ -1,4 +1,4 @@
-> **Experimental build workspace:** this repository contains a NOLA 1.4.2 save-transfer fix. No modified game DLL has been produced yet; the full build needs authorized access to UEPseudo. See [build status and instructions](BUILD_STATUS_RU.md). Original project documentation follows.
+> **Unofficial experimental build:** this repository contains a NOLA 1.4.2 save-transfer fix. In-game stability has not been verified. See [build status, downloads and instructions](BUILD_STATUS_RU.md). Original project documentation follows.
 
 <p align="center"><img src="assets/nola_title.png" alt="NOLA - No One Left Alone" width="720"></p>
 
